@@ -5,6 +5,7 @@
  */
 
 #include <iostream>
+#include <iomanip>
 #include <fstream>
 #include <algorithm>
 #include <string>
@@ -19,6 +20,11 @@
 #include <unistd.h>
 #include <string.h>
 #include <errno.h>
+
+#ifndef O_LARGEFILE
+/* FreeBSD doesn't have this definition */
+#define O_LARGEFILE (0)
+#endif
 
 /*
  * Copyright © (c) Robert White <rwhite@pobox.com> 2011
@@ -67,6 +73,12 @@ namespace po = boost::program_options;
 
 using namespace std;
 
+inline ssize_t
+xfer(bool reading, int fd, void *buf, size_t count)
+{
+  return reading ? read(fd,buf,count) : write(fd,buf,count);
+}
+
 int main(int argc, char * argv[])
 {
   const size_t	expanse=1024*1024*2;
@@ -79,6 +91,7 @@ int main(int argc, char * argv[])
   bool		direct = true;
   int		random = 0;
   int		fill = 0;
+  bool		reading = false;
 
   cin.unsetf(ios::hex | ios::dec | ios::oct );
 
@@ -89,12 +102,17 @@ int main(int argc, char * argv[])
     ("skip,s", po::value<off64_t>(&skip)->default_value(0), "skip (bytes) before writing")
     ("number,n", po::value<int>(&number)->default_value(0), "number of 2MB blocks to write")
     ("direct", po::value<bool>(&direct)->default_value(true), "use direct io")
+    ("reading", po::value<bool>(&reading)->default_value(false), "read file instead of write")
     ("random,r",po::value(&random)->default_value(0), "randomize contents of file")
     ;
 
   po::variables_map vm;
   po::store(parse_command_line(argc, argv, desc),vm);
   po::notify(vm);
+  if (vm.count("help")) {
+    cout << desc << endl;
+    return 0;
+  }
 
   void *	buffer = mmap(0,expanse,
 				PROT_READ|PROT_WRITE,
@@ -118,44 +136,47 @@ int main(int argc, char * argv[])
     cerr << "Could Not Open File \"" << filename << "\":" << strerror(errno) << endl;
     exit(1);
   }
-  
+
   int * const	base = static_cast<int *>(buffer);
   int * const	extent = (base + (expanse / sizeof(int)));
-  bool		rerandom = false;
-  if (random) {
-    long		seed;
-    fstream entropy("/dev/urandom",ios::in|ios::binary);
-    entropy.read(reinterpret_cast<char *>(&seed),sizeof(seed));
-    srand48(seed);
-    generate(base,extent,lrand48);
-    cerr << "Buffer Pointer: " << buffer
-         << " Fill " << (rerandom?"Regenerating":"Repeating")
-         << " Random Buffer, Write Size: " << dec << (expanse>>10) << "kb"
-         << endl;
-  } else {
-    const int	fill=((argc>2)?strtol(argv[2],0,0):0L);
-    cerr << "Buffer Pointer: " << buffer
-         << " Fill Character: 0x" << hex << (fill&0xFF)
-         << " Write Size: " << dec << (expanse>>10) << "kb"
-         << endl;
-    memset(buffer,(fill&0xFF),expanse);
+  if (!reading) {
+    if (random) {
+      long		seed;
+      fstream entropy("/dev/urandom",ios::in|ios::binary);
+      entropy.read(reinterpret_cast<char *>(&seed),sizeof(seed));
+      srand48(seed);
+      generate(base,extent,lrand48);
+      cerr << "Buffer Pointer: " << buffer
+	   << " Fill " << ((random>1)?"Regenerating":"Repeating")
+	   << " Random Buffer, Write Size: " << dec << (expanse>>10) << "kb"
+	   << endl;
+    } else {
+      cerr << "Buffer Pointer: " << buffer
+	   << " Fill Character: 0x" << hex << (fill&0xFF)
+	   << " Write Size: " << dec << (expanse>>9) << "kb"
+	   << endl;
+      memset(buffer,(fill&0xFF),expanse);
+    }
   }
   if (skip) {
      int64_t	sought = lseek(fd,skip,SEEK_SET);
-     cout << "Offset before writing is " << sought << endl;
+     cerr << "Offset before transfer is " << sought << endl;
   }
-  cerr << "Writing Commenses: " << endl;
-  while ((0 < (bytes_written = write(fd,buffer,expanse))) && (++counter != number)) {
+  cerr << "Transfer Commenses: " << endl;
+  while ((0 < (bytes_written = xfer(reading,fd,buffer,expanse))) && (++counter != number)) {
     bytes_total += bytes_written;
-    if (0 == counter % 10) cerr << "Write #: " << counter
-    				<< " Total: " << (bytes_total >> 10)
-				<< "kb\r";
+    if (0 == counter % 10) cerr << "Xfer #: " << setw(5) << counter
+				<< " Bytes: " << setw(10) << bytes_written
+    				<< " Total: " << (bytes_total >> 9)
+				<< "kb\r"
+				<< flush;
       if (random > 1) generate(base,extent,lrand48);
   }
   fsync(fd);
-    cerr << "Write #: " << counter
-    	<< " Bytes: " << bytes_written
-    	<< " Total: " << (bytes_total >> 10)
+    if (bytes_written > 0) bytes_total += bytes_written;
+    cerr << "Xfer #: " << setw(5) << counter
+    	<< " Bytes: " << setw(10) << bytes_written
+    	<< " Total: " << (bytes_total >> 9) << "kb"
 	<< endl;
   close(fd);
   return 0;
